@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * The city clock, which counts ticks. Just like a CPU/hardware clock.
@@ -28,13 +30,40 @@ public class Clock {
     private int tickNum;
 
     // TODO: add the fields you need, such as a lock, its conditions, the number of waiters, and the clock thread
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition allDriversWaiting = lock.newCondition();
+    private final Condition nextTickStarted = lock.newCondition();
+    private int totalNumOfDrivers = 0;
+    private int numOfDriversAtCurrentTick = 0;
+    private Thread clockThread;
 
     /**
      * Starts a separate thread that calls {@code startNextTick()} in a loop until {@code stopClock()} is called.
      * Does nothing if a clock thread is already running due to a previous call.
      */
     public void startClock() {
-        // TODO
+        lock.lock();
+        try {
+            if (clockThread != null && clockThread.isAlive()) {
+                return;
+            }
+
+            clockThread = new Thread(() -> {
+                try {
+                    while (true) {
+                        startNextTick();
+                    }
+
+                } catch (InterruptedException ignored) {
+                }
+            });
+
+            clockThread.setDaemon(true);
+            clockThread.start();
+
+        }finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -42,7 +71,27 @@ public class Clock {
      * Does nothing if no clock thread is running.
      */
     public void stopClock() {
-        // TODO
+        Thread thread;
+
+        lock.lock();
+        try {
+            thread = clockThread;
+            clockThread = null;
+        } finally {
+             lock.unlock();
+        }
+
+        if (thread == null) {
+            return;
+        }
+
+        thread.interrupt();
+        try {
+            thread.join();
+        }catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
     }
 
     /**
@@ -53,7 +102,19 @@ public class Clock {
      * @throws InterruptedException if the current thread is interrupted while waiting
      */
     public void startNextTick() throws InterruptedException {
-        // TODO
+        lock.lock();
+        try {
+            while (totalNumOfDrivers == 0 || numOfDriversAtCurrentTick < totalNumOfDrivers) {
+                allDriversWaiting.await();
+            }
+
+            tickNum++;
+            runAlarms();
+            numOfDriversAtCurrentTick = 0;
+            nextTickStarted.signalAll();
+        }finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -63,7 +124,21 @@ public class Clock {
      * @throws InterruptedException if the current thread is interrupted while waiting
      */
     public void waitForTick() throws InterruptedException {
-        // TODO
+       lock.lock();
+
+       try {
+           int currentTick = tickNum;
+
+           numOfDriversAtCurrentTick++;
+           allDriversWaiting.signal();
+
+           while (currentTick == tickNum) {
+               nextTickStarted.await();
+           }
+
+       }finally {
+           lock.unlock();
+       }
     }
 
     /**
@@ -95,7 +170,14 @@ public class Clock {
      * {@code waitForTick()} before starting a tick.
      */
     public void signalNewWaiter() {
-        // TODO
+        lock.lock();
+        try {
+            totalNumOfDrivers++;
+
+        }finally {
+            lock.unlock();
+
+        }
     }
 
     /**
@@ -103,7 +185,19 @@ public class Clock {
      * is already waiting, the next tick can now start. Does nothing if there are no waiters.
      */
     public void signalRemoveWaiter() {
-        // TODO
+        lock.lock();
+        try {
+            if (totalNumOfDrivers == 0) {
+                return;
+            }
+
+            totalNumOfDrivers--;
+            allDriversWaiting.signal();
+
+        }finally {
+            lock.unlock();
+        }
+
     }
 
     /**
@@ -127,10 +221,16 @@ public class Clock {
      * @param action the action to run
      */
     public void setAlarmAt(int tick, Runnable action) {
-        if (tick <= tickNum) {
-            throw new IllegalArgumentException("tick " + tick + " is not after the current tick " + tickNum);
+        lock.lock();
+        try {
+            if (tick <= tickNum) {
+                throw new IllegalArgumentException("tick " + tick + " is not after the current tick " + tickNum);
+            }
+            alarms.computeIfAbsent(tick, t -> new ArrayList<>()).add(action);
+
+        }finally {
+            lock.unlock();
         }
-        alarms.computeIfAbsent(tick, t -> new ArrayList<>()).add(action);
     }
 
     /**
@@ -141,10 +241,16 @@ public class Clock {
      * @param action   the action to run
      */
     public void setAlarm(int numTicks, Runnable action) {
-        if (numTicks < 1) {
-            throw new IllegalArgumentException("numTicks must be at least 1");
+        lock.lock();
+        try {
+            if (numTicks < 1) {
+                throw new IllegalArgumentException("numTicks must be at least 1");
+            }
+            setAlarmAt(tickNum + numTicks, action);
+
+        } finally {
+            lock.unlock();
         }
-        setAlarmAt(tickNum + numTicks, action);
     }
 
     /**
@@ -154,7 +260,12 @@ public class Clock {
      * @return true if an alarm is set for a later tick, otherwise false
      */
     public boolean hasAlarms() {
-        return !alarms.isEmpty();
+        lock.lock();
+        try {
+            return !alarms.isEmpty();
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -164,6 +275,11 @@ public class Clock {
      * @return the number of ticks that have been started; 0 before the first tick
      */
     public int getTickNum() {
-        return tickNum;
+        lock.lock();
+        try {
+            return tickNum;
+        } finally {
+            lock.unlock();
+        }
     }
 }
